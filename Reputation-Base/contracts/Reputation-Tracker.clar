@@ -12,6 +12,7 @@
 (define-constant ERR-INVALID-PARTICIPANT-STATE (err u302))
 (define-constant ERR-INSUFFICIENT-ECONOMIC-RESOURCES (err u400))
 (define-constant ERR-ECONOMIC-POLICY-VIOLATION (err u401))
+(define-constant ERR-INVALID-CONTEXT-LENGTH (err u500))
 
 ;; Protocol Constants
 ;; Reputation Management Bounds
@@ -150,6 +151,13 @@
     ERR-INVALID-PARAMETERS)
 )
 
+(define-private (validate-evaluation-context (context (optional (string-utf8 100))))
+    (match context
+        ctx (if (<= (len ctx) u100) (ok context) ERR-INVALID-CONTEXT-LENGTH)
+        (ok none)
+    )
+)
+
 (define-private (compute-weighted-reputation 
     (current-reputation uint) 
     (new-reputation uint) 
@@ -188,8 +196,30 @@
     }))
     (begin
         (asserts! (is-governance-administrator) ERR-UNAUTHORIZED-ACCESS)
+        
+        ;; Explicitly validate the minimum-reputation-threshold
+        (asserts! (>= (get minimum-reputation-threshold proposed-protocol-params) MIN-REPUTATION-SCORE) ERR-INVALID-PARAMETERS)
+        
+        ;; Explicitly validate the maximum-reputation-threshold
+        (asserts! (<= (get maximum-reputation-threshold proposed-protocol-params) MAX-REPUTATION-SCORE) ERR-INVALID-PARAMETERS)
+        
+        ;; Explicitly validate the minimum-stake-amount
+        (asserts! (>= (get minimum-stake-amount proposed-protocol-params) MINIMUM-STAKE-REQUIREMENT) ERR-INVALID-PARAMETERS)
+        
+        ;; Explicitly validate the epoch-block-length
+        (asserts! (and 
+            (>= (get epoch-block-length proposed-protocol-params) u1)
+            (<= (get epoch-block-length proposed-protocol-params) u10000)
+        ) ERR-INVALID-PARAMETERS)
+        
         (let
             ((validated-params (try! (validate-protocol-configuration proposed-protocol-params))))
+            
+            ;; Additional validation after the validate-protocol-configuration function
+            (asserts! (< (get minimum-reputation-threshold validated-params) 
+                        (get maximum-reputation-threshold validated-params)) 
+                    ERR-INVALID-PARAMETERS)
+            
             (var-set protocol-configuration validated-params)
             (ok true)
         )
@@ -240,12 +270,24 @@
             (evaluator-credentials (unwrap! (map-get? evaluator-authorization tx-sender) ERR-UNAUTHORIZED-ACCESS))
             (participant-record (unwrap! (map-get? participant-directory target-participant) ERR-PARTICIPANT-NOT-FOUND))
             (current-protocol-epoch (get current-protocol-epoch (var-get protocol-metrics)))
+            ;; Create a safe default context
+            (default-context none)
         )
         (asserts! (get is-authorized evaluator-credentials) ERR-UNAUTHORIZED-ACCESS)
         (asserts! (is-within-reputation-bounds proposed-reputation-score) ERR-OUT-OF-BOUNDS)
         
+        ;; Validate the evaluation context and get a validated version
         (let
             (
+                ;; Use unwrap-panic since we're just validating, not returning the result
+                (validated-context (if (is-some evaluation-context)
+                                      (begin
+                                        ;; Validate and use the original if valid
+                                        (unwrap-panic (validate-evaluation-context evaluation-context))
+                                        evaluation-context)
+                                      ;; Use the default if none provided
+                                      default-context))
+                
                 (weighted-reputation-score (compute-weighted-reputation 
                     (get reputation-level participant-record)
                     proposed-reputation-score
@@ -269,7 +311,7 @@
                     weighted-reputation-score: weighted-reputation-score,
                     evaluator-principal: tx-sender,
                     evaluation-timestamp: block-height,
-                    evaluation-context: evaluation-context
+                    evaluation-context: validated-context
                 }
             )
             
